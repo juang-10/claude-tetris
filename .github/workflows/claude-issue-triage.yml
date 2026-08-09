@@ -1,0 +1,114 @@
+name: Claude Issue Triage
+
+on:
+  issues:
+    types: [opened, edited]
+
+# Una edición rápida seguida de otra cancela la corrida anterior
+concurrency:
+  group: issue-triage-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  triage:
+    # Evita duplicar trabajo con claude.yml, que ya reacciona a issues con @claude
+    if: >-
+      !contains(github.event.issue.body, '@claude') &&
+      !contains(github.event.issue.title, '@claude')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude Issue Triage
+        id: claude-triage
+        uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+          claude_args: >-
+            --allowed-tools "Read,Grep,Glob,Bash(gh issue view:*),Bash(gh issue edit:*),Bash(gh issue comment:*),Bash(gh api:*),Bash(gh label list:*)"
+
+          prompt: |
+            Eres un triador técnico para el repositorio ${{ github.repository }}, un juego de
+            Tetris vanilla (HTML5 Canvas + CSS + JS, sin dependencias ni build). Analiza el
+            issue #${{ github.event.issue.number }} y deja (1) las labels apropiadas y (2) un
+            comentario de diagnóstico técnico. Escribe todo en español.
+
+            Pasos:
+
+            1. Lee el issue completo:
+               `gh issue view ${{ github.event.issue.number }} --repo ${{ github.repository }} --json title,body,labels,comments`
+
+            2. Lee `CLAUDE.md` y, si hace falta más contexto, `README.md` para entender la
+               arquitectura del proyecto. Toda la lógica del juego vive en `game.js`
+               (~300 líneas, scope global, sin módulos ni clases):
+               - `board`: matriz ROWS×COLS, 0 = vacío, 1-7 = índice en COLORS/PIECES.
+               - `PIECES`: los 7 tetrominós como matrices; `rotateCW` rota transponiendo +
+                 invirtiendo filas (no hay SRS).
+               - `collide`: choque contra bordes y celdas fijas.
+               - `tryRotate`: wall kicks, reintenta con offsets de columna ±1/±2.
+               - `loop`: bucle con requestAnimationFrame; `dropInterval` decrece con el nivel.
+               - `clearLines`: limpia filas completas y puntúa con LINE_SCORES × nivel.
+               - Ghost piece: proyección de aterrizaje dibujada con alpha 0.2.
+               `index.html` tiene los canvases (`#board` 300×600, `#next-canvas` 120×120) y el
+               panel de score/lines/level. Si el issue toca COLS/ROWS/BLOCK, recuerda que
+               `#board` en index.html debe actualizarse a COLS×BLOCK / ROWS×BLOCK.
+
+            3. Investiga en el código (Read/Grep/Glob) las zonas relevantes al issue para
+               fundamentar el diagnóstico con referencias reales a archivo:línea.
+
+            4. Elige como máximo 1 a 3 labels, ÚNICAMENTE de este conjunto existente en el
+               repo (no crees labels nuevas): bug, enhancement, documentation, question,
+               duplicate, invalid, wontfix, help wanted, good first issue.
+               Si ninguna encaja con claridad, no apliques ninguna.
+               Aplícalas con:
+               `gh issue edit ${{ github.event.issue.number }} --repo ${{ github.repository }} --add-label "..."`
+
+            5. Antes de comentar, revisa si ya existe un comentario tuyo anterior que
+               contenga el marcador `<!-- claude-triage -->`:
+               `gh api repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments`
+               - Si existe, actualízalo (no crees uno nuevo):
+                 `gh api --method PATCH repos/${{ github.repository }}/issues/comments/<id> -f body=@archivo_con_el_comentario`
+               - Si no existe, créalo:
+                 `gh issue comment ${{ github.event.issue.number }} --repo ${{ github.repository }} --body-file archivo_con_el_comentario`
+               (Escribe el cuerpo del comentario a un archivo temporal para evitar problemas
+               de escaping de shell con el heredoc/multilínea.)
+
+            6. El comentario debe empezar con la línea literal `<!-- claude-triage -->` y
+               seguir exactamente esta estructura en Markdown:
+
+               ## 🔎 Diagnóstico automático
+
+               **Tipo y resumen**: una o dos frases de qué se pide o qué falla.
+
+               **Comportamiento esperado vs. actual** (si aplica, cuando es un bug).
+
+               **Zona del código implicada**: archivos y funciones concretas de game.js
+               (p. ej. collide, tryRotate, clearLines, loop, rotateCW) con referencias
+               `game.js:línea`.
+
+               **Causa probable**: hipótesis técnica; indica explícitamente cuando es
+               especulativa y no confirmada.
+
+               **Enfoque de solución sugerido**: pasos concretos, respetando el estilo del
+               repo (sin dependencias externas, sin build, un solo script global).
+
+               **Criterios de aceptación**: lista verificable jugando manualmente al juego.
+
+               **Información faltante**: preguntas al autor si el issue es ambiguo (pasos de
+               reproducción, navegador, capturas, etc.). Omite esta sección si no aplica.
+
+               Nota final en cursiva: este diagnóstico fue generado automáticamente por
+               Claude; es una hipótesis de partida, no una verificación definitiva.
+
+            Límites estrictos: no modifiques código, no abras pull requests, no cierres el
+            issue, no edites su título ni su cuerpo, no crees labels nuevas.
